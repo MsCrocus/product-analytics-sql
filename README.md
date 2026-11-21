@@ -101,3 +101,92 @@ because the purchase sample is still small (135 vs 190 purchases).
 - The sample ratio check is descriptive (no chi-square test).
 - Possible extensions: time-to-convert analysis, retention curves beyond D7, a Looker Studio or Power BI dashboard
   on top of the funnel and retention queries, and running the same logic on BigQuery.
+
+
+  # SQL ile Ürün Analitiği: Huni, Elde Tutma ve A/B Testi
+
+**Sentetik** bir mobil uygulama veri setinin SQL analizi. Proje, bir ürün ekibinin yeni sürümden sonra sorduğu soruları yanıtlıyor: *Verilere güvenebilir miyiz? Kullanıcılar nerede kopuyor? Hangi kanallar daha iyi dönüşüm sağlıyor? Kullanıcılar geri geliyor mu? Yeni onboarding akışı gerçekten kazandı mı?*
+
+> **Veri notu:** Veri seti kurgusaldır ve `scripts/generate_data.py` ile üretilmiştir (sabit seed, tekrarlanabilir). Hiçbir gerçek şirketten veya uygulamadan gelmemektedir. Onboarding deneyinin etkisi üreticiye önceden yerleştirilmiştir; dolayısıyla bulgular gerçek dünya sonuçlarını değil, *yöntemi* göstermektedir.
+
+## Bu proje neler gösteriyor?
+
+- Analizden önce veri doğrulama (tekrarlar, yetim satırlar, imkânsız zaman damgaları, tutarsız değerler)
+- CTE'ler ve koşullu toplama ile huni analizi ve segment kırılımları
+- Tarih aritmetiği ve self-join ile kohort elde tutma (D1 / D7)
+- A/B test analizi: örnek oranı kontrolü (sample ratio check), varyant başına dönüşüm, artış (lift) ve iki oranlı z-testi
+- Pencere fonksiyonları: `LAG`, `FIRST_VALUE`, `RANK`, hareketli ortalamalar, kümülatif toplamlar
+
+## Veri modeli
+
+| Tablo | Satır | Açıklama |
+|---|---|---|
+| `users` | 5.000 | Kullanıcı başına bir satır: kayıt tarihi, platform, ülke, edinme kanalı |
+| `events` | 47.412 | Olay günlüğü: `app_open`, `onboarding_start`, `onboarding_complete`, `paywall_view`, `trial_start`, `purchase`, `feature_use` |
+| `subscriptions` | 326 | Ücretli abonelik başına bir satır (aylık veya yıllık plan) |
+| `experiment_assignments` | 5.000 | `onboarding_v2` deneyinin varyantı (`control` / `variant`) |
+
+Kayıtlar 2026-01-01 ile 2026-03-01 arasında, olaylar ise 2026-03-31'e kadar sürmektedir.
+
+**Kasıtlı olarak eklenen veri kalitesi sorunları** (doğrulama adımının bulacak bir şeyi olsun diye): 30 tekrarlı olay, 15 yetim olay, kayıttan önceki tarihli 20 olay, ülkesi olmayan 40 kullanıcı, platform yazımı tutarsız 25 kullanıcı. `sql/00_schema_and_views.sql` bunları düzelten `users_clean` ve `events_clean` view'larını tanımlar ve sonraki tüm sorgular bu view'ları kullanır.
+
+## Sorgular
+
+| Dosya | İş sorusu |
+|---|---|
+| `00_schema_and_views.sql` | Tablolar ve temizleme view'ları |
+| `01_data_quality_checks.sql` | Ham tablolara güvenebilir miyiz? |
+| `02_daily_active_users.sql` | DAU ve 7 günlük hareketli ortalama |
+| `03_onboarding_funnel.sql` | Kullanıcılar kayıttan satın almaya giderken nerede kopuyor? |
+| `04_funnel_by_segment.sql` | Hangi kanallar ve platformlar en iyi dönüşümü sağlıyor? |
+| `05_retention_by_cohort.sql` | Haftalık kayıt kohortu başına D1 ve D7 elde tutma |
+| `06_ab_test_onboarding_v2.sql` | Örnek oranı kontrolü ve varyant başına sonuçlar |
+| `07_revenue_and_channels.sql` | Gelir, ARPU, gelir payı ve kümülatif gelir |
+
+## Nasıl çalıştırılır?
+
+Python 3.9+ gerektirir (yalnızca standart kütüphane). SQL, **SQLite 3.25+** için yazılmıştır.
+
+```bash
+python scripts/generate_data.py          # isteğe bağlı: CSV dosyaları zaten /data içinde
+python scripts/load_db.py                # CSV'lerden product_analytics.db oluşturur
+python scripts/run_query.py sql/03_onboarding_funnel.sql
+python scripts/ab_test_significance.py   # deney için z-testi
+```
+
+Arayüz mü tercih ediyorsunuz? `product_analytics.db` dosyasını [DB Browser for SQLite](https://sqlitebrowser.org/) ile açıp herhangi bir sorguyu yapıştırabilirsiniz.
+
+## Temel bulgular
+
+**Veri kalitesi.** Kasıtlı eklenen tüm sorunlar tespit edildi (30 tekrar, 15 yetim, kayıttan önceki 20 olay, 40 eksik ülke, 25 standart dışı platform değeri). Temizlemeden sonra bir aboneliğin eşleşen `purchase` olayı kayboldu; bu, tablolar arası mutabakat kontrollerinin neden önemli olduğunu gösteriyor.
+
+**Huni (5.000 kayıt).**
+
+| Adım | Kullanıcı | Önceki adımın % | Kayıtların % |
+|---|---|---|---|
+| Kayıt | 5.000 | | 100,0 |
+| Onboarding başladı | 4.604 | 92,1 | 92,1 |
+| Onboarding tamamlandı | 2.729 | 59,3 | 54,6 |
+| Paywall görüntülendi | 2.231 | 81,8 | 44,6 |
+| Deneme başladı | 693 | 31,1 | 13,9 |
+| Satın alma | 325 | 46,9 | 6,5 |
+
+En büyük iki düşüş, onboarding tamamlama (başlayanların %59,3'ü) ve paywall'dan denemeye geçiştir (%31,1).
+
+**Kanallar.** Referans en iyi dönüşümü sağlıyor (kullanıcıların %8,3'ü satın alıyor; denemelerinin %60,0'ı dönüşüyor), ücretli sosyal medya ise en kötüsü (%5,4; %39,2). Organik kanal, hacmi sayesinde en fazla geliri getiriyor (%43,9 pay); kullanıcı başına gelirde ise referans önde (yaklaşık 1,11 $ ile ücretli sosyalin 0,56 $'ına karşı).
+
+**Elde tutma.** Tam kayıt haftaları için D1 elde tutma %25,9 ile %30,0 arasında, D7 ise %12,5 ile %16,8 arasında değişiyor. Kohort başına yaklaşık 570 kullanıcı olduğundan, haftalar arasındaki birkaç puanlık farklar dikkatle yorumlanmalıdır.
+
+**A/B testi `onboarding_v2`.** Kullanıcılar %49,7 / %50,3 olarak bölündü (örnek oranı sorunu yok).
+
+| Metrik | Control | Variant | Mutlak artış | p-değeri |
+|---|---|---|---|---|
+| Onboarding tamamlama (birincil) | %51,19 | %57,93 | +6,74 pp | < 0,001 |
+| Deneme başlatma (ikincil) | %11,40 | %16,29 | +4,89 pp | < 0,001 |
+
+Bu sayılara dayanan öneri: yeni onboarding akışını yaygınlaştırın ve ücretli dönüşümü izlemeye devam edin; çünkü satın alma örneklemi hâlâ küçük (135'e karşı 190 satın alma).
+
+## Sınırlamalar ve sonraki adımlar
+
+- Sentetik veri: artışlar, çoğu gerçek deneye kıyasla daha büyük ve daha temizdir.
+- Anlamlılık testi her metriği ayrı ayrı ele alır; çoklu test düzeltmesi veya segment analizi yoktur.
